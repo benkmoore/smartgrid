@@ -1,0 +1,153 @@
+using DataFrames;
+using CSV;
+using DelimitedFiles;
+using Plots;
+using Random;
+using Distributions;
+
+include("Exploration_epsgreedy.jl")
+include("Round.jl")
+include("Pad.jl")
+
+path = "C:\\Users\\Ben\\Documents\\smartgridrl\\FINLAND_ENERGY.csv"
+energy_Data = readdlm(path,',')[2:end,:]
+num_rows, num_cols = size(energy_Data)
+
+for row = 1 : num_rows
+    #Parse time step as Int from time string
+    energy_Data[row,1] = parse(Int, energy_Data[row,1][12:13])
+end
+
+#LIB - STATE
+LIBattery_step = 1
+CAP_LIBattery = 30
+storage_LIBattery = transpose(collect(0:LIBattery_step:CAP_LIBattery)) #capacity: i.e. what it can hold - X
+#LIB - ACTION
+MaxRate_LIBattery = 10
+out_LIBattery = transpose(collect(0:LIBattery_step:MaxRate_LIBattery)) #power rating: what it can take up/supply - Mx
+in_LIBattery = transpose(collect(0:LIBattery_step:MaxRate_LIBattery)) #what it can pull/take in - Nx
+
+#HYDRO - STATE
+Hydro_step = 1
+CAP_Hydro = 50
+storage_Hydro = transpose(collect(0:Hydro_step:CAP_Hydro)) #capacity: i.e. what it can hold - Y
+#HYDRO - ACTION
+MaxRate_Hydro = 5
+out_Hydro = transpose(collect(0:Hydro_step:MaxRate_Hydro)) #power rating: what it can take up/supply - My
+in_Hydro = transpose(collect(0:Hydro_step:MaxRate_Hydro)) #what it can pull/take in - Ny
+
+#Encode Actions always out with out/in with in. Never mix eg out with in
+actions_dict = Dict()
+#Action in pairs -> send in to storage
+for H_act_in = 0:Hydro_step:MaxRate_Hydro
+    if H_act_in == 0
+        global act = 1
+    end
+    for LIB_act_in = 0:LIBattery_step:MaxRate_LIBattery
+        #Pad each action out to length of max sized action
+        H_act_in = Pad_H_acts(H_act_in,MaxRate_Hydro)
+        LIB_act_in = Pad_LIB_acts(LIB_act_in,MaxRate_LIBattery)
+        actions_dict[string("SEND",H_act_in,LIB_act_in)] = act
+        global act = act + 1
+    end
+end
+#Action out pairs -> pull out of storage
+for H_act_out=0:Hydro_step:MaxRate_Hydro
+    for LIB_act_out = 0:LIBattery_step:MaxRate_LIBattery
+        H_act_out = Pad_H_acts(H_act_out,MaxRate_Hydro)
+        LIB_act_out = Pad_LIB_acts(LIB_act_out,MaxRate_LIBattery)
+        actions_dict[string("PULL",H_act_out,LIB_act_out)] = act
+        global act = act + 1
+    end
+end
+
+#Num states = all possible timesteps {0,1,2...,23} x all possible storage amounts
+num_states = (length(storage_Hydro))*(length(storage_LIBattery))*(24) #time range length = 24
+num_actions = length(actions_dict)
+Q = zeros(num_states, num_actions)
+
+#Encode States in dict
+states_dict = Dict()
+for H=0:Hydro_step:CAP_Hydro
+    for B=0:LIBattery_step:CAP_LIBattery
+        for T=0:1:23
+            if H == 0
+                global state_num = 1
+            end
+            #Pad out state string
+            T = PadT(T)
+            B = PadBattery(B,CAP_LIBattery)
+            H = PadHydro(H,CAP_Hydro)
+            states_dict[string(H,B,T)] = state_num
+            state_num = state_num + 1
+        end
+    end
+end
+
+for t = 1 : num_rows
+    if t == 1
+        #Storage Initialise = 0
+        global Hydro_amount = 0
+        global LIBattery_amount = 0
+    end
+    time_day = energy_Data[t,1]
+    cost_GP = energy_Data[t,5]
+    demand_t = energy_Data[t,6]
+    solar_p = energy_Data[t,7]
+    wind_p = energy_Data[t,8]
+
+    #1) read in encoded state based on storage_Hydro, storage_LIBattery & time day => S
+    time_day = PadT(time_day)
+    Hydro = PadHydro(Hydro_amount,CAP_Hydro)
+    LIBattery = PadBattery(LIBattery_amount,CAP_LIBattery)
+    state_t = states_dict[string(Hydro,LIBattery,time_day)]
+
+    #2) choose Action based on exploration strategy
+    #Re Initialise waste and pull_grid each iteration
+    pull_grid = 0
+    waste = 0
+    delta = solar_p + wind_p - demand_t
+    if delta < 0 #energy deficit = renew.s not meeting demand -> pull = pull out of storage/grid
+        pull_Hydro, pull_LIBattery, pull_grid, x = action_pull(abs(delta), Hydro_amount, Hydro_step, MaxRate_Hydro, LIBattery_amount, LIBattery_step, MaxRate_LIBattery)
+        #print("PULL",'\t',pull_Hydro,'\t', pull_LIBattery,'\t', pull_grid,'\n')
+        #Update storage levels
+        Hydro_amount = Hydro_amount - pull_Hydro
+        LIBattery_amount = LIBattery_amount - pull_LIBattery
+        #Get action from dict
+        out_H = Pad_H_acts(pull_Hydro,MaxRate_Hydro)
+        out_LIB = Pad_LIB_acts(pull_LIBattery,MaxRate_LIBattery)
+        action_t = actions_dict[string("PULL",out_H,out_LIB)]
+    elseif delta > 0 #energy surplus = renew.s greater than demand -> send = send to storage/waste
+        send_Hydro, send_LIBattery, waste,x = action_send(delta, Hydro_amount, Hydro_step, CAP_Hydro, MaxRate_Hydro, LIBattery_amount, LIBattery_step, CAP_LIBattery, MaxRate_LIBattery)
+        #print("SEND",'\t',send_Hydro,'\t', send_LIBattery,'\t', waste,'\n')
+        #Update storage levels
+        Hydro_amount = Hydro_amount + send_Hydro
+        LIBattery_amount = LIBattery_amount + send_LIBattery
+        #Get action from dict
+        in_H = Pad_H_acts(send_Hydro,MaxRate_Hydro)
+        in_LIB = Pad_LIB_acts(send_LIBattery,MaxRate_LIBattery)
+        action_t = actions_dict[string("SEND",in_H,in_LIB)]
+    end
+    #print(Hydro_amount,'\t',LIBattery_amount,'\n')
+
+    #3) calculate reward
+    r = -(pull_grid*cost_GP) - (waste*cost_GP)
+
+    #4) update Q via Bellman
+    #Find next state and observations at next state
+    if t != num_rows
+        time_day_prime = energy_Data[t+1,1]
+        time_day_prime = PadT(time_day_prime)
+        Hydro_prime = PadHydro(Hydro_amount,CAP_Hydro)
+        LIBattery_prime = PadBattery(LIBattery_amount,CAP_LIBattery)
+        state_prime = states_dict[string(Hydro_prime,LIBattery_prime,time_day_prime)]
+
+        Q_star = maximum(Q[state_prime,:])
+        alpha = 0.5
+        Q[state_t,action_t] = Q[state_t,action_t] + alpha*(r + (Q_star) - Q[state_t,action_t])
+    end
+
+end
+
+using JLD;
+save("C:\\Users\\Ben\\Documents\\smartgridrl\\Q_matrix_QLearning.jld", "data", Q)

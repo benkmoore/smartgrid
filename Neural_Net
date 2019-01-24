@@ -1,0 +1,77 @@
+
+from keras.models import Sequential
+from keras.layers import Dense
+from LossFunc_MSE_mod import *
+import numpy as np
+import pandas as pd
+from numpy import genfromtxt
+import matplotlib.pyplot as plt
+
+# fix random seed for reproducibility
+np.random.seed(7)
+
+# load data set using pandas
+train_df = pd.read_csv("x_sqrt.csv", delimiter=";")
+#train_data = np.read_csv("x_sqrt.csv")
+#train_data = genfromtxt('x_sqrt.csv', delimiter=';')
+
+#check data has been read in properly
+train_df.head()
+
+
+# split into input (X) and output (Y) variables
+train_X = train_df[['x']]#.astype(np.float64)
+train_Y = train_df.drop(columns=['x','y'])
+#train_X = train_data[:,0]
+#train_Y = train_data[:,2]
+
+
+#get number of columns in training data
+n_cols = train_X.shape[1]
+
+amount = [3,6,9]
+
+for i in range(len(amount)):
+	print(amount[i])
+	# create model
+	model = Sequential()
+	model.add(Dense(10, activation='relu', input_shape=(n_cols,)))
+	# shape=(n_cols,) : this means n nr of input columns with any amount of rows, so open comma
+	#model.add(Dense(4, activation='sigmoid'))
+	model.add(Dense(7, activation='relu'))
+	#model.add(Dense(amount[i], activation='sigmoid'))
+	model.add(Dense(amount[i], activation='relu'))
+	model.add(Dense(1))
+
+	# Compile model
+	model.compile(loss=get_weighted_loss(), optimizer='adam', metrics=['accuracy'])
+
+	# Training the model using model fit
+	model.fit(train_X, train_Y, epochs=2000)
+
+
+
+
+	# evaluate the model
+	scores = model.evaluate(train_X, train_Y)
+	print("\n%s: %.2f%%" % (model.metrics_names[1], scores[1]*100))
+
+
+	weights = model.get_weights() # list of numpy arrays
+	model.summary()
+
+	# Make predictions on dataset Xnew
+
+	test_X = np.linspace(0,10,101)
+
+	test_y_predictions = model.predict(test_X)
+
+	plt.plot(test_X,test_y_predictions,'r--',label=['predictions with ', amount[i], 'connections'])
+	plt.ylabel('Y')
+	plt.xlabel('X')
+	plt.legend(loc='best')
+
+
+plt.plot(train_X,train_df['y'],'b',label='real model')
+plt.plot(train_X,train_df['y_noise'],'go',markersize=2, label='model samples +  gaussian noise')
+plt.show()
